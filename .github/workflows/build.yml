@@ -1,0 +1,164 @@
+name: Build Tela Esticada (StretchLab)
+
+# Repo: este workflow + el zip StretchLab*.zip en la raíz
+# (o el código ya descomprimido en la raíz con settings.gradle.kts)
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+    paths:
+      - "*.zip"
+      - "**.kt"
+      - "**.kts"
+      - ".github/workflows/**"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: stretchlab-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      HAS_KEYSTORE: ${{ secrets.KEYSTORE_BASE64 != '' }}
+      GRADLE_OPTS: -Dorg.gradle.daemon=false -Dorg.gradle.jvmargs=-Xmx2g
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolver raíz del proyecto
+        id: root
+        run: |
+          set -euo pipefail
+
+          # 1) Código ya en la raíz
+          if [ -f settings.gradle.kts ] || [ -f settings.gradle ]; then
+            echo "root=." >> "$GITHUB_OUTPUT"
+            echo "mode=source"
+            echo "Proyecto en la raíz del repo"
+            exit 0
+          fi
+
+          # 2) Zip más reciente en la raíz
+          ZIP=""
+          BEST=-1
+          shopt -s nullglob
+          for z in *.zip; do
+            [ -f "$z" ] || continue
+            ct=$(git log -1 --format=%ct -- "$z" 2>/dev/null || echo 0)
+            [[ "$ct" =~ ^[0-9]+$ ]] || ct=0
+            if [ "$ct" -gt "$BEST" ] || { [ "$ct" -eq "$BEST" ] && [[ "$z" > "${ZIP:-}" ]]; }; then
+              BEST=$ct
+              ZIP="$z"
+            fi
+          done
+          shopt -u nullglob
+
+          if [ -z "$ZIP" ]; then
+            echo "::error::No hay settings.gradle.kts ni ningún .zip del proyecto en la raíz"
+            ls -la
+            exit 1
+          fi
+
+          echo "Zip: $ZIP"
+          rm -rf project
+          mkdir project
+          unzip -q "$ZIP" -d project
+
+          SETTINGS=$(find project -name settings.gradle.kts -o -name settings.gradle | head -1 || true)
+          if [ -z "$SETTINGS" ]; then
+            echo "::error::El zip no contiene settings.gradle.kts"
+            find project -maxdepth 4 -type d
+            exit 1
+          fi
+          ROOT=$(dirname "$SETTINGS")
+          echo "root=$ROOT" >> "$GITHUB_OUTPUT"
+          echo "mode=zip"
+          echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
+          echo "Proyecto: $ROOT"
+          find "$ROOT" -type f \( -name '*.kt' -o -name '*.kts' -o -name 'AndroidManifest.xml' \) | sort
+
+      - name: Comprobar proyecto
+        working-directory: ${{ steps.root.outputs.root }}
+        run: |
+          set -euo pipefail
+          [ -f app/src/main/AndroidManifest.xml ] || { echo "::error::Falta AndroidManifest.xml"; exit 1; }
+          [ -f app/build.gradle.kts ] || [ -f app/build.gradle ] || { echo "::error::Falta app/build.gradle"; exit 1; }
+          find app/src/main -name '*.kt' | grep -q . || { echo "::error::No hay fuentes Kotlin"; exit 1; }
+          echo "OK · $(find app/src/main -name '*.kt' | wc -l) archivos .kt"
+
+      - name: JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.7"
+          build-root-directory: ${{ steps.root.outputs.root }}
+
+      - name: Keystore (opcional)
+        if: env.HAS_KEYSTORE == 'true'
+        run: |
+          set -euo pipefail
+          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > "$RUNNER_TEMP/release.jks"
+          echo "KEYSTORE_PATH=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
+          echo "KEYSTORE_PASSWORD=${{ secrets.KEYSTORE_PASSWORD }}" >> "$GITHUB_ENV"
+          echo "KEY_ALIAS=${{ secrets.KEY_ALIAS }}" >> "$GITHUB_ENV"
+          echo "KEY_PASSWORD=${{ secrets.KEY_PASSWORD }}" >> "$GITHUB_ENV"
+
+      - name: APK release firmado
+        if: env.HAS_KEYSTORE == 'true'
+        working-directory: ${{ steps.root.outputs.root }}
+        run: gradle :app:assembleRelease --stacktrace
+
+      - name: APK debug
+        if: env.HAS_KEYSTORE != 'true'
+        working-directory: ${{ steps.root.outputs.root }}
+        run: gradle :app:assembleDebug --stacktrace
+
+      - name: Preparar artefactos
+        working-directory: ${{ steps.root.outputs.root }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          mapfile -t APKS < <(find app/build/outputs/apk -name '*.apk' -type f | sort)
+          if [ "${#APKS[@]}" -eq 0 ]; then
+            echo "::error::No se generó APK"
+            find app/build/outputs -type f | head -40 || true
+            exit 1
+          fi
+          OUT=""
+          for a in "${APKS[@]}"; do
+            case "$a" in *release*) OUT="$a"; break ;; esac
+          done
+          [ -n "$OUT" ] || OUT="${APKS[0]}"
+          SAFE=$(echo "${{ github.ref_name }}" | sed 's#[^A-Za-z0-9._-]#-#g')
+          cp -v "$OUT" "$GITHUB_WORKSPACE/dist/TelaEsticada-${SAFE}.apk"
+          (cd "$GITHUB_WORKSPACE/dist" && sha256sum *.apk > SHA256SUMS.txt && ls -la && cat SHA256SUMS.txt)
+
+      - name: Subir artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: TelaEsticada-apk
+          path: dist/*
+          if-no-files-found: error
+
+      - name: Release (tags v*)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: dist/*
+          
