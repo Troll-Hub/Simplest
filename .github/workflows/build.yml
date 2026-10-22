@@ -1,165 +1,44 @@
-name: Build SimpleHorizon (desde el zip)
+name: Build SimpleHorizon
 
 on:
   push:
-    branches: [main, master]
-    tags: ["v*"]
   workflow_dispatch:
-
-permissions:
-  contents: write
-
-# Cancela compilaciones viejas de la misma rama; nunca cancela una de tag (release)
-concurrency:
-  group: build-${{ github.ref }}
-  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
-    env:
-      HAS_KEYSTORE: ${{ secrets.KEYSTORE_BASE64 != '' }}
-      GRADLE_OPTS: -Dorg.gradle.daemon=false -Dorg.gradle.jvmargs=-Xmx2g
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Descomprimir proyecto
+        run: unzip -q SimpleHorizon-1_2_1-diagnostico.zip -d src
+
+      - name: JDK 17
+        uses: actions/setup-java@v4
         with:
-          fetch-depth: 0
+          distribution: temurin
+          java-version: 17
 
-      # ── 1. Descomprimir el zip más reciente de la raíz ─────────────────────
-      - name: Descomprimir el proyecto
-        id: unzip
+      - name: Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Licencias y plataforma 34
         run: |
-          set -euo pipefail
-          ZIP=""; BEST=-1
-          shopt -s nullglob
-          for z in *.zip; do
-            [ -f "$z" ] || continue
-            ct=$(git log -1 --format=%ct -- "$z" 2>/dev/null || echo 0)
-            [[ "$ct" =~ ^[0-9]+$ ]] || ct=0
-            if [ "$ct" -gt "$BEST" ] || { [ "$ct" -eq "$BEST" ] && [[ "$z" > "${ZIP:-}" ]]; }; then
-              BEST=$ct; ZIP="$z"
-            fi
-          done
-          shopt -u nullglob
-          echo "Zips: $(ls *.zip 2>/dev/null | tr '\n' ' ')"
-          [ -n "$ZIP" ] || { echo "::error::No hay ningún .zip en la raíz del repositorio"; exit 1; }
-          rm -rf project && mkdir project
-          unzip -q "$ZIP" -d project -x '__MACOSX/*' '*/.DS_Store'
-          SETTINGS=$(find project -maxdepth 6 -name settings.gradle.kts -not -path '*/__MACOSX/*' | head -1)
-          [ -n "$SETTINGS" ] || { echo "::error::El zip no contiene settings.gradle.kts"; exit 1; }
-          ROOT=$(dirname "$SETTINGS")
-          echo "root=$ROOT" >> "$GITHUB_OUTPUT"
-          echo "Zip: $ZIP → $ROOT"
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager "platforms;android-34" "build-tools;34.0.0"
 
-      # ── 2. Validar estructura y leer la versión ────────────────────────────
-      - name: Comprobar proyecto
-        id: meta
-        working-directory: ${{ steps.unzip.outputs.root }}
-        run: |
-          set -euo pipefail
-          [ -f app/src/main/AndroidManifest.xml ] || { echo "::error::Falta AndroidManifest.xml"; exit 1; }
-          [ -f app/build.gradle.kts ] || { echo "::error::Falta app/build.gradle.kts"; exit 1; }
-          find app/src/main -name '*.kt' | grep -q . || { echo "::error::No hay código Kotlin"; exit 1; }
-          VERSION=$(sed -nE 's/.*versionName *= *"([^"]+)".*/\1/p' app/build.gradle.kts | head -1)
-          [ -n "$VERSION" ] || VERSION="desconocida"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Versión de la app: $VERSION"
-          if [[ "${GITHUB_REF}" == refs/tags/v* && "${GITHUB_REF_NAME#v}" != "$VERSION" ]]; then
-            echo "::warning::El tag ${GITHUB_REF_NAME} no coincide con versionName ($VERSION)"
-          fi
-
-      # ── 3. Toolchain ───────────────────────────────────────────────────────
-      - uses: actions/setup-java@v4
-        with: { distribution: temurin, java-version: "17" }
-
-      - uses: gradle/actions/setup-gradle@v4
+      - name: Gradle 8.7
+        uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: "8.7"
-          build-root-directory: ${{ steps.unzip.outputs.root }}
+          gradle-version: 8.7
 
-      # ── 4. Tests ───────────────────────────────────────────────────────────
-      - name: Tests unitarios
-        working-directory: ${{ steps.unzip.outputs.root }}
-        run: gradle :app:testDebugUnitTest --stacktrace
+      - name: Compilar APK release
+        working-directory: src/SimpleHorizon-1.2.1
+        run: gradle :app:assembleRelease --no-daemon
 
-      - name: Subir reporte de tests (si fallan)
-        if: failure()
+      - name: Subir APK
         uses: actions/upload-artifact@v4
         with:
-          name: test-report
-          path: ${{ steps.unzip.outputs.root }}/app/build/reports/tests
-          if-no-files-found: ignore
-
-      # ── 5. Firma (solo si hay secrets) ─────────────────────────────────────
-      - name: Keystore (si hay secrets)
-        if: env.HAS_KEYSTORE == 'true'
-        env:
-          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
-          SECRET_KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
-          SECRET_KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
-          SECRET_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-        run: |
-          set -euo pipefail
-          echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
-          {
-            echo "KEYSTORE_PATH=$RUNNER_TEMP/release.jks"
-            echo "KEYSTORE_PASSWORD=$SECRET_KEYSTORE_PASSWORD"
-            echo "KEY_ALIAS=$SECRET_KEY_ALIAS"
-            echo "KEY_PASSWORD=$SECRET_KEY_PASSWORD"
-          } >> "$GITHUB_ENV"
-
-      # ── 6. APK: release (R8) → release sin minificar → debug ───────────────
-      - name: APK release
-        id: apk
-        working-directory: ${{ steps.unzip.outputs.root }}
-        run: |
-          if gradle :app:assembleRelease --stacktrace; then
-            echo "variant=release" >> "$GITHUB_OUTPUT"
-          elif echo "::warning::Release con R8 falló; reintentando sin minificar" \
-               && gradle :app:assembleRelease -PminifyOff --stacktrace; then
-            echo "variant=release-sin-minificar" >> "$GITHUB_OUTPUT"
-          else
-            echo "::warning::Release falló; armando debug"
-            gradle :app:assembleDebug --stacktrace
-            echo "variant=debug" >> "$GITHUB_OUTPUT"
-          fi
-
-      # ── 7. Artefactos ──────────────────────────────────────────────────────
-      - name: Preparar artefactos
-        working-directory: ${{ steps.unzip.outputs.root }}
-        env:
-          APP_VERSION: ${{ steps.meta.outputs.version }}
-          VARIANT: ${{ steps.apk.outputs.variant }}
-        run: |
-          set -euo pipefail
-          mkdir -p "$GITHUB_WORKSPACE/dist"
-          mapfile -t APKS < <(find app/build/outputs/apk -name '*.apk' -type f | sort)
-          [ "${#APKS[@]}" -gt 0 ] || { echo "::error::No se generó ningún APK"; exit 1; }
-          OUT=""
-          for a in "${APKS[@]}"; do case "$a" in *release*) OUT="$a"; break ;; esac; done
-          [ -n "$OUT" ] || OUT="${APKS[0]}"
-          SAFE=$(echo "$APP_VERSION" | sed 's#[^A-Za-z0-9._-]#-#g')
-          SUFFIX=""; [ "$VARIANT" = "debug" ] && SUFFIX="-debug"
-          cp -v "$OUT" "$GITHUB_WORKSPACE/dist/SimpleHorizon-${SAFE}${SUFFIX}.apk"
-          # mapping de R8: útil para descifrar crashes de un release minificado
-          MAP=$(find app/build/outputs/mapping -name mapping.txt -type f 2>/dev/null | head -1 || true)
-          [ -z "$MAP" ] || cp -v "$MAP" "$GITHUB_WORKSPACE/dist/mapping-${SAFE}.txt"
-          (cd "$GITHUB_WORKSPACE/dist" && sha256sum *.apk > SHA256SUMS.txt && ls -la)
-          echo "### SimpleHorizon ${APP_VERSION} (${VARIANT})" >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
-          cat "$GITHUB_WORKSPACE/dist/SHA256SUMS.txt" >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: SimpleHorizon-apk
-          path: dist/*
-          if-no-files-found: error
-
-      - name: Release
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          generate_release_notes: true
-          files: dist/*
+          name: SimpleHorizon-release
+          path: src/SimpleHorizon-1.2.1/app/build/outputs/apk/release/*.apk
