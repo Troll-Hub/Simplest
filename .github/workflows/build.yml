@@ -7,12 +7,19 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Descomprimir proyecto
-        run: unzip -q SimpleHorizon-1_2_1-diagnostico.zip -d src
+      - name: Descomprimir el zip que empieza con Simple
+        run: |
+          ZIP=$(ls Simple*.zip | head -n 1)
+          echo "Zip: $ZIP"
+          unzip -q "$ZIP" -d src
+          PROJ=$(dirname "$(find src -name settings.gradle.kts | head -n 1)")
+          echo "PROJ=$PROJ" >> "$GITHUB_ENV"
+          echo "Proyecto: $PROJ"
 
       - name: JDK 17
         uses: actions/setup-java@v4
@@ -23,9 +30,10 @@ jobs:
       - name: Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Licencias y plataforma 34
+      - name: Aceptar licencias e instalar SDK 34
         run: |
-          yes | sdkmanager --licenses > /dev/null || true
+          printf 'y\n%.0s' $(seq 100) > /tmp/yes.txt
+          sdkmanager --licenses < /tmp/yes.txt > /dev/null
           sdkmanager "platforms;android-34" "build-tools;34.0.0"
 
       - name: Gradle 8.7
@@ -33,12 +41,13 @@ jobs:
         with:
           gradle-version: 8.7
 
-      - name: Compilar APK release
-        working-directory: src/SimpleHorizon-1.2.1
-        run: gradle :app:assembleRelease --no-daemon
+      - name: Compilar APK debug
+        working-directory: ${{ env.PROJ }}
+        run: gradle :app:assembleDebug --no-daemon --stacktrace
 
       - name: Subir APK
         uses: actions/upload-artifact@v4
         with:
-          name: SimpleHorizon-release
-          path: src/SimpleHorizon-1.2.1/app/build/outputs/apk/release/*.apk
+          name: SimpleHorizon-debug
+          path: ${{ env.PROJ }}/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
