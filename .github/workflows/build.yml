@@ -10,9 +10,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Descomprimir SimpleHorizon.zip
+      - name: Descomprimir el zip Simple*.zip
         run: |
-          unzip -q -o SimpleHorizon.zip -d src_unzipped
+          ZIP=$(find . -maxdepth 2 -type f -name 'Simple*.zip' | head -1)
+          if [ -z "$ZIP" ]; then echo "No se encontró ningún Simple*.zip"; exit 1; fi
+          echo "Usando: $ZIP"
+          unzip -q -o "$ZIP" -d src_unzipped
           PROJ=$(dirname "$(find src_unzipped -name settings.gradle.kts | head -1)")
           echo "PROJ=$PROJ" >> "$GITHUB_ENV"
           # los PNG vacíos (0 bytes) rompen la compilación de recursos
