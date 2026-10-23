@@ -10,9 +10,9 @@ runs-on: ubuntu-latest
 ​steps:
 - name: Checkout repository
 uses: actions/checkout@v4
-​- name: Find and unzip Simple*.zip
+​- name: Find and unzip Simple archive
 run: |
-ZIP_FILE=$(find . -maxdepth 2 -name "Simple*.zip" | head -n 1)
+ZIP_FILE=$(find . -maxdepth 2 -name 'Simple*.zip' | head -n 1)
 if [ -n "$ZIP_FILE" ]; then
 echo "Descomprimiendo $ZIP_FILE..."
 unzip -o "$ZIP_FILE" -d .
