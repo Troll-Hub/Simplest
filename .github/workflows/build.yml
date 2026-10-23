@@ -1,4 +1,4 @@
-name: Build SimpleHorizon
+name: Build APK
 
 on:
   push:
@@ -7,47 +7,33 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Descomprimir el zip que empieza con Simple
+      - name: Descomprimir SimpleHorizon.zip
         run: |
-          ZIP=$(ls Simple*.zip | head -n 1)
-          echo "Zip: $ZIP"
-          unzip -q "$ZIP" -d src
-          PROJ=$(dirname "$(find src -name settings.gradle.kts | head -n 1)")
+          unzip -q -o SimpleHorizon.zip -d src_unzipped
+          PROJ=$(dirname "$(find src_unzipped -name settings.gradle.kts | head -1)")
           echo "PROJ=$PROJ" >> "$GITHUB_ENV"
-          echo "Proyecto: $PROJ"
+          # los PNG vacíos (0 bytes) rompen la compilación de recursos
+          find "$PROJ" -type f -name '*.png' -size 0 -delete
 
-      - name: JDK 17
-        uses: actions/setup-java@v4
+      - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
 
-      - name: Instalar SDK 34 con el SDK preinstalado del runner
-        run: |
-          echo "ANDROID_HOME=$ANDROID_HOME"
-          SDKM=$(find "$ANDROID_HOME/cmdline-tools" -name sdkmanager -type f | head -n 1)
-          echo "sdkmanager: $SDKM"
-          printf 'y\n%.0s' $(seq 100) > /tmp/yes.txt
-          "$SDKM" --licenses < /tmp/yes.txt > /dev/null || true
-          "$SDKM" "platforms;android-34" "build-tools;34.0.0"
+      - uses: android-actions/setup-android@v3
 
-      - name: Gradle 8.7
-        uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: 8.7
+          gradle-version: 8.9
 
-      - name: Compilar APK debug
+      - name: Build debug APK
         working-directory: ${{ env.PROJ }}
-        run: gradle :app:assembleDebug --no-daemon --stacktrace
+        run: gradle assembleDebug --no-daemon
 
-      - name: Subir APK
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: SimpleHorizon-debug
+          name: SimpleHorizon-debug-apk
           path: ${{ env.PROJ }}/app/build/outputs/apk/debug/*.apk
-          if-no-files-found: error
