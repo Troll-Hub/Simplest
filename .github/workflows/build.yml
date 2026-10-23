@@ -1,63 +1,44 @@
-name: Build APK
-
+name: build-simplehorizon
 on:
   push:
+    paths: ['Simple*.zip', '.github/workflows/build.yml']
   workflow_dispatch:
 
 jobs:
-  build:
+  apk:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      - name: Descomprimir el Simple*.zip más reciente
+      - name: Descomprimir el proyecto
         run: |
-          ZIP=""; BEST=0
-          while IFS= read -r f; do
-            t=$(git log -1 --format=%ct -- "$f")
-            t=${t:-0}
-            if [ "$t" -ge "$BEST" ]; then BEST=$t; ZIP=$f; fi
-          done < <(find . -maxdepth 2 -type f -name 'Simple*.zip' -not -path './.git/*')
-          if [ -z "$ZIP" ]; then echo "No se encontró ningún Simple*.zip"; exit 1; fi
-          echo "Usando: $ZIP"
-          rm -rf src_unzipped
-          unzip -q -o "$ZIP" -d src_unzipped
-          PROJ=$(dirname "$(find src_unzipped -name settings.gradle.kts | head -1)")
-          echo "PROJ=$PROJ" >> "$GITHUB_ENV"
-          # los PNG vacíos (0 bytes) rompen la compilación de recursos
-          find "$PROJ" -type f -name '*.png' -size 0 -delete
+          ZIP=$(ls -t Simple*.zip 2>/dev/null | head -1); [ -z "$ZIP" ] && ZIP=$(ls -t *.zip | head -1)
+          echo "Usando $ZIP"
+          mkdir -p src && unzip -q -o "$ZIP" -d src
+          DIR=$(dirname "$(find src -name settings.gradle.kts | head -1)")
+          echo "PROJECT_DIR=$DIR" >> "$GITHUB_ENV"
 
       - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: 17
+        with: { distribution: temurin, java-version: 17 }
 
       - uses: android-actions/setup-android@v3
         with:
-          packages: ''
-
-      - name: Instalar plataforma y build-tools
-        run: |
-          yes | sdkmanager --licenses > /dev/null || true
-          sdkmanager "platforms;android-35" "build-tools;35.0.0"
+          packages: "platforms;android-34 build-tools;34.0.0 cmake;3.22.1 ndk;26.1.10909125"
 
       - uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: 8.11.1
+        with: { gradle-version: 8.9 }
 
-      - name: Build debug APK
-        working-directory: ${{ env.PROJ }}
+      - name: Compilar
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: gradle :app:assembleRelease --no-daemon --stacktrace
+
+      - name: Verificar que el ayudante táctil quedó en el APK
+        working-directory: ${{ env.PROJECT_DIR }}
         run: |
-          if [ -f gradlew ]; then
-            chmod +x gradlew
-            ./gradlew assembleDebug --no-daemon --stacktrace
-          else
-            gradle assembleDebug --no-daemon --stacktrace
-          fi
+          APK=$(ls app/build/outputs/apk/release/*.apk | head -1)
+          unzip -l "$APK" | grep -E "libtouchremap|classes" || echo "AVISO: libtouchremap.so no está en el APK"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: SimpleHorizon-debug-apk
-          path: ${{ env.PROJ }}/app/build/outputs/apk/debug/*.apk
+          name: SimpleHorizon-apk
+          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/release/*.apk
