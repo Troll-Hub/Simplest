@@ -1,63 +1,63 @@
-name: Build SimpleHorizon
+name: Build APK
 
 on:
   push:
-  pull_request:
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Find and unzip Simple*.zip
+      - name: Descomprimir el Simple*.zip más reciente
         run: |
-          ZIP=$(find . -maxdepth 3 -type f -name 'Simple*.zip' | head -n 1)
-          if [ -z "$ZIP" ]; then
-            echo "No Simple*.zip found, building current tree"
-            echo "SRC_DIR=." >> $GITHUB_ENV
-          else
-            echo "Found $ZIP"
-            rm -rf extracted
-            mkdir -p extracted
-            unzip -q "$ZIP" -d extracted
-            ROOT=$(find extracted -type f \( -name 'settings.gradle' -o -name 'settings.gradle.kts' -o -name 'gradlew' \) | head -n 1 | xargs -r dirname)
-            if [ -z "$ROOT" ]; then ROOT=extracted; fi
-            echo "SRC_DIR=$ROOT" >> $GITHUB_ENV
-            echo "Using project at $ROOT"
-            ls -la "$ROOT"
-          fi
+          ZIP=""; BEST=0
+          while IFS= read -r f; do
+            t=$(git log -1 --format=%ct -- "$f")
+            t=${t:-0}
+            if [ "$t" -ge "$BEST" ]; then BEST=$t; ZIP=$f; fi
+          done < <(find . -maxdepth 2 -type f -name 'Simple*.zip' -not -path './.git/*')
+          if [ -z "$ZIP" ]; then echo "No se encontró ningún Simple*.zip"; exit 1; fi
+          echo "Usando: $ZIP"
+          rm -rf src_unzipped
+          unzip -q -o "$ZIP" -d src_unzipped
+          PROJ=$(dirname "$(find src_unzipped -name settings.gradle.kts | head -1)")
+          echo "PROJ=$PROJ" >> "$GITHUB_ENV"
+          # los PNG vacíos (0 bytes) rompen la compilación de recursos
+          find "$PROJ" -type f -name '*.png' -size 0 -delete
 
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
+      - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: ''
 
-      - name: Grant execute permission for gradlew
-        working-directory: ${{ env.SRC_DIR }}
+      - name: Instalar plataforma y build-tools
         run: |
-          if [ -f gradlew ]; then chmod +x gradlew; fi
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager "platforms;android-35" "build-tools;35.0.0"
 
-      - name: Build Debug APK
-        working-directory: ${{ env.SRC_DIR }}
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.11.1
+
+      - name: Build debug APK
+        working-directory: ${{ env.PROJ }}
         run: |
           if [ -f gradlew ]; then
-            ./gradlew assembleDebug --stacktrace
+            chmod +x gradlew
+            ./gradlew assembleDebug --no-daemon --stacktrace
           else
-            gradle assembleDebug --stacktrace || true
+            gradle assembleDebug --no-daemon --stacktrace
           fi
 
-      - name: Upload APK
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: SimpleHorizon-debug
-          path: |
-            ${{ env.SRC_DIR }}/app/build/outputs/apk/debug/*.apk
-            **/app/build/outputs/apk/debug/*.apk
-          if-no-files-found: warn
+          name: SimpleHorizon-debug-apk
+          path: ${{ env.PROJ }}/app/build/outputs/apk/debug/*.apk
