@@ -23,7 +23,7 @@ jobs:
 
       - uses: android-actions/setup-android@v3
         with:
-          packages: "platforms;android-34 build-tools;34.0.0"
+          packages: "platforms;android-34 build-tools;34.0.0 cmake;3.22.1 ndk;26.1.10909125"
 
       - uses: gradle/actions/setup-gradle@v4
         with: { gradle-version: 8.9 }
@@ -31,6 +31,12 @@ jobs:
       - name: Compilar
         working-directory: ${{ env.PROJECT_DIR }}
         run: gradle :app:assembleRelease --no-daemon --stacktrace
+
+      - name: Verificar que el ayudante táctil quedó en el APK
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          APK=$(ls app/build/outputs/apk/release/*.apk | head -1)
+          unzip -l "$APK" | grep -E "libtouchremap" || echo "AVISO: libtouchremap.so no está en el APK"
 
       - uses: actions/upload-artifact@v4
         with:
