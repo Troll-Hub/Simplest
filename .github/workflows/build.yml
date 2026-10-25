@@ -1,44 +1,95 @@
-name: build-simplehorizon
+name: Build Oxygen Launcher
+
+# Guardar como: .github/workflows/build.yml
+# Funciona con el zip (oxygen-launcher.zip) subido al repo o con el proyecto ya descomprimido.
+
 on:
   push:
-    paths: ['Simple*.zip', '.github/workflows/build.yml']
+    branches: [ main, master ]
+  pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  apk:
+  build:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Descargar repositorio
+        uses: actions/checkout@v4
 
-      - name: Descomprimir el proyecto
+      - name: Descomprimir zip y localizar el proyecto
+        shell: bash
         run: |
-          ZIP=$(ls -t Simple*.zip 2>/dev/null | head -1); [ -z "$ZIP" ] && ZIP=$(ls -t *.zip | head -1)
-          echo "Usando $ZIP"
-          mkdir -p src && unzip -q -o "$ZIP" -d src
-          DIR=$(dirname "$(find src -name settings.gradle.kts | head -1)")
-          echo "PROJECT_DIR=$DIR" >> "$GITHUB_ENV"
+          set -euo pipefail
 
-      - uses: actions/setup-java@v4
-        with: { distribution: temurin, java-version: 17 }
+          # Busca el zip del launcher en el repo (raíz o hasta 3 niveles)
+          ZIP=$(find . -maxdepth 3 -type f -iname 'oxygen-launcher*.zip' -not -path './_src/*' -not -path './.git/*' | head -n1 || true)
 
-      - uses: android-actions/setup-android@v3
+          if [ -n "$ZIP" ]; then
+            echo "Zip encontrado: $ZIP"
+            rm -rf _src
+            mkdir -p _src
+            unzip -q -o "$ZIP" -d _src
+            SEARCH_DIR=_src
+          else
+            echo "No hay zip; se usa el proyecto ya descomprimido en el repo"
+            SEARCH_DIR=.
+          fi
+
+          # Carpeta con settings.gradle(.kts) más cercana a la raíz
+          SETTINGS=$(find "$SEARCH_DIR" \( -name settings.gradle.kts -o -name settings.gradle \) -not -path '*/build/*' -not -path './.git/*' \
+            | awk '{print length($0) " " $0}' | sort -n | head -n1 | cut -d' ' -f2-)
+
+          if [ -z "$SETTINGS" ]; then
+            echo "::error::No se encontró settings.gradle(.kts). Revisa el contenido del zip."
+            exit 1
+          fi
+
+          PROJECT_DIR=$(cd "$(dirname "$SETTINGS")" && pwd)
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "Proyecto en: $PROJECT_DIR"
+          ls -la "$PROJECT_DIR"
+
+      - name: Configurar JDK 17
+        uses: actions/setup-java@v4
         with:
-          packages: "platforms;android-34 build-tools;34.0.0 cmake;3.22.1 ndk;26.1.10909125"
+          distribution: temurin
+          java-version: 17
 
-      - uses: gradle/actions/setup-gradle@v4
-        with: { gradle-version: 8.9 }
+      - name: Configurar Android SDK
+        uses: android-actions/setup-android@v3
 
-      - name: Compilar
-        working-directory: ${{ env.PROJECT_DIR }}
-        run: gradle :app:assembleRelease --no-daemon --stacktrace
+      - name: Configurar Gradle 8.7 (respaldo si falta el wrapper)
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+          cache-read-only: ${{ github.ref != 'refs/heads/main' && github.ref != 'refs/heads/master' }}
 
-      - name: Verificar que el ayudante táctil quedó en el APK
+      - name: Compilar APK debug
+        shell: bash
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
-          APK=$(ls app/build/outputs/apk/release/*.apk | head -1)
-          unzip -l "$APK" | grep -E "libtouchremap" || echo "AVISO: libtouchremap.so no está en el APK"
+          set -euo pipefail
+          if [ -f gradlew ] && [ -f gradle/wrapper/gradle-wrapper.jar ]; then
+            chmod +x gradlew
+            ./gradlew assembleDebug --stacktrace --no-daemon
+          else
+            echo "Wrapper incompleto; se usa Gradle 8.7 instalado"
+            gradle assembleDebug --stacktrace --no-daemon
+          fi
 
-      - uses: actions/upload-artifact@v4
+      - name: Subir APK
+        uses: actions/upload-artifact@v4
         with:
-          name: SimpleHorizon-apk
-          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/release/*.apk
+          name: OxygenLauncher-debug
+          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 30
