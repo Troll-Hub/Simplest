@@ -64,8 +64,11 @@ jobs:
           distribution: temurin
           java-version: 17
 
-      - name: Configurar Android SDK
-        uses: android-actions/setup-android@v3
+      - name: Aceptar licencias del Android SDK (ya viene instalado en el runner)
+        shell: bash
+        run: |
+          echo "ANDROID_HOME=${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          yes | "${ANDROID_HOME:-/usr/local/lib/android/sdk}/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
 
       - name: Configurar Gradle 8.7 (respaldo si falta el wrapper)
         uses: gradle/actions/setup-gradle@v4
