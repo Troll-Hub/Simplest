@@ -1,54 +1,89 @@
-name: Build desde ZIP
+name: Build APK desde ZIP
 
 on:
   push:
-    paths:
-      - 'inbox/*.zip'
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
   workflow_dispatch:
     inputs:
-      zip_path:
-        description: 'Ruta del zip en el repo'
+      zip_prefix:
+        description: 'Cómo empieza el nombre del ZIP'
         required: false
-        default: 'inbox/SaveEditor.zip'
+        default: 'OpenTrace'
+
+env:
+  # Cambia 'OpenTrace' por el comienzo del nombre de tu ZIP
+  ZIP_PREFIX: ${{ github.event.inputs.zip_prefix || 'OpenTrace' }}
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    env:
-      INPUT_ZIP: ${{ github.event.inputs.zip_path }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Descomprimir ZIP y localizar el proyecto
+      - name: Buscar y descomprimir el ZIP
+        id: src
+        shell: bash
         run: |
-          ZIP="${INPUT_ZIP:-$(ls inbox/*.zip | head -n1)}"
-          echo "Usando zip: $ZIP"
-          rm -rf work && mkdir work
-          unzip -q "$ZIP" -d work
-          SETTINGS=$(find work \( -name settings.gradle.kts -o -name settings.gradle \) | head -n1)
-          if [ -z "$SETTINGS" ]; then echo "No se encontró settings.gradle en el zip"; exit 1; fi
-          echo "PROJ=$(dirname "$SETTINGS")" >> "$GITHUB_ENV"
+          set -euo pipefail
+          mapfile -t zips < <(find . -type f -iname "${ZIP_PREFIX}*.zip" \
+            -not -path './.git/*' -not -path './_src/*' | sort -V)
+
+          if [ ${#zips[@]} -eq 0 ]; then
+            if ls settings.gradle* >/dev/null 2>&1; then
+              echo "No hay ZIP que empiece por '$ZIP_PREFIX'; se compila el repo tal cual."
+              echo "dir=." >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "::error::No se encontró ningún ZIP cuyo nombre empiece por '$ZIP_PREFIX'"
+            exit 1
+          fi
+
+          zip="${zips[-1]}"   # si hay varios, el último por orden de versión
+          echo "ZIP elegido: $zip"
+          rm -rf _src && mkdir _src
+          unzip -q -o "$zip" -d _src
+
+          settings=$(find _src -maxdepth 5 \( -name 'settings.gradle' -o -name 'settings.gradle.kts' \) \
+            -not -path '*/__MACOSX/*' | head -n 1)
+          if [ -z "$settings" ]; then
+            echo "::error::El ZIP no contiene settings.gradle(.kts)"
+            exit 1
+          fi
+          dir=$(dirname "$settings")
+          echo "Proyecto en: $dir"
+          echo "dir=$dir" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: 17
 
       - uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: '8.9'
+          gradle-version: 8.9
 
-      - name: Compilar APK debug
+      - name: Compilar (debug)
+        working-directory: ${{ steps.src.outputs.dir }}
         run: |
-          cd "$PROJ"
-          if [ ! -f gradlew ]; then gradle wrapper --gradle-version 8.9; fi
-          chmod +x gradlew
-          ./gradlew assembleDebug --stacktrace
+          if [ -f ./gradlew ]; then
+            chmod +x ./gradlew
+            ./gradlew assembleDebug --stacktrace
+          else
+            gradle assembleDebug --stacktrace
+          fi
 
       - uses: actions/upload-artifact@v4
         with:
-          name: SaveEditor-debug
-          path: ${{ env.PROJ }}/app/build/outputs/apk/debug/*.apk
+          name: APK-debug
+          path: ${{ steps.src.outputs.dir }}/**/build/outputs/apk/**/*.apk
+
+      - name: Publicar release (tags v*)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.src.outputs.dir }}/**/build/outputs/apk/**/*.apk
